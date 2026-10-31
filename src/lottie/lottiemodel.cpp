@@ -20,6 +20,7 @@
 #include <cassert>
 #include <iterator>
 #include <stack>
+#include <unordered_map>
 #include "vimageloader.h"
 #include "vline.h"
 
@@ -75,15 +76,37 @@ public:
     {
         switch (obj->mType) {
         case LOTData::Type::Repeater:
-        case LOTData::Type::ShapeGroup:
-        case LOTData::Type::Layer: {
+        case LOTData::Type::ShapeGroup: {
             visitChildren(static_cast<LOTGroupData *>(obj));
+            break;
+        }
+        case LOTData::Type::Layer: {
+            // Upstream 2cab35d: bound the precomp nesting this pass walks to
+            // the depth LOTCompItem builds items for; deeper layers are never
+            // rendered. A precomp asset is shared by every layer referencing
+            // it, so also skip a layer already processed at the same or a
+            // shallower depth: that revisit is a no-op (its repeaters already
+            // have content), but without the check a wide precomp graph is
+            // walked an exponential number of times.
+            if (mLayerDepth >= kLottieMaxLayerDepth) break;
+            auto found = mVisitedLayerDepth.find(obj);
+            if (found != mVisitedLayerDepth.end() &&
+                found->second <= mLayerDepth)
+                break;
+            mVisitedLayerDepth[obj] = mLayerDepth;
+            ++mLayerDepth;
+            visitChildren(static_cast<LOTGroupData *>(obj));
+            --mLayerDepth;
             break;
         }
         default:
             break;
         }
     }
+
+private:
+    int                               mLayerDepth{0};
+    std::unordered_map<LOTData *, int> mVisitedLayerDepth;
 };
 
 void LOTCompositionData::processRepeaterObjects()
