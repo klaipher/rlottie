@@ -509,12 +509,23 @@ static VPointF curvesForArc(const VRectF &rect, float startAngle,
     return startPoint;
 }
 
-static constexpr float POLYSTAR_MAX_POINTS = 512.0f;
+/*
+ * The point count of a polystar/polygon comes straight from the animation data
+ * and is used both as an allocation size and as a loop bound. A NaN, an
+ * infinity or a value such as 1e38 makes the float -> size_t conversion of the
+ * vertex count undefined (it saturates to SIZE_MAX here), after which reserve()
+ * either throws std::length_error or, when the count wraps back to a small
+ * number, the vertex loop runs ~SIZE_MAX times and exhausts memory. Reject the
+ * counts that cannot describe a shape and cap the rest well above anything a
+ * real design uses, while staying cheap to rasterize.
+ */
+static constexpr float POLYSTAR_MAX_POINTS = 1000.0f;
 
-static inline bool vIsValidPointCount(float points)
+static bool clampPolystarPointCount(float &points)
 {
-    return std::isfinite(points) && points >= 0.0f &&
-           points <= POLYSTAR_MAX_POINTS;
+    if (!(points >= 1.0f)) return false;  // also rejects NaN
+    if (points > POLYSTAR_MAX_POINTS) points = POLYSTAR_MAX_POINTS;
+    return true;
 }
 
 void VPath::VPathData::addPolystar(float points, float innerRadius,
@@ -522,7 +533,7 @@ void VPath::VPathData::addPolystar(float points, float innerRadius,
                                    float outerRoundness, float startAngle,
                                    float cx, float cy, VPath::Direction dir)
 {
-    if (!vIsValidPointCount(points)) return;
+    if (!clampPolystarPointCount(points)) return;
 
     const static float POLYSTAR_MAGIC_NUMBER = 0.47829f / 0.28f;
     float              currentAngle = (startAngle - 90.0f) * K_PI / 180.0f;
@@ -628,7 +639,7 @@ void VPath::VPathData::addPolygon(float points, float radius, float roundness,
                                   float startAngle, float cx, float cy,
                                   VPath::Direction dir)
 {
-    if (!vIsValidPointCount(points)) return;
+    if (!clampPolystarPointCount(points)) return;
 
     // TODO: Need to support floating point number for number of points
     const static float POLYGON_MAGIC_NUMBER = 0.25;

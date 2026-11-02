@@ -64,7 +64,14 @@ class LOTCompItem
 {
 public:
    explicit LOTCompItem(LOTModel *model);
-   static std::unique_ptr<LOTLayerItem> createLayerItem(LOTLayerData *layerData);
+   // Upstream 2cab35d: precomp nesting and the total number of layer items
+   // are bounded, so cyclic-free but deep or exponentially wide precomp
+   // graphs cannot overflow the stack or exhaust memory.
+   static constexpr int    kMaxLayerDepth = kLottieMaxLayerDepth;
+   static constexpr size_t kMaxLayerNodes = 100000;
+   static std::unique_ptr<LOTLayerItem> createLayerItem(LOTLayerData *layerData,
+                                                        int depth,
+                                                        size_t &nodeBudget);
    bool update(int frameNo, const VSize &size, bool keepAspectRatio);
    VSize size() const { return mViewSize;}
    void buildRenderTree();
@@ -112,6 +119,7 @@ public:
    bool complexContent() const {return mComplexContent;}
    virtual void update(int frameNo, const VMatrix &parentMatrix, float parentAlpha);
    VMatrix matrix(int frameNo) const;
+   VMatrix matrix(int frameNo, int depth) const;
    virtual void renderList(std::vector<VDrawable *> &){}
    virtual void render(VPainter *painter, const VRle &mask, const VRle &matteRle);
    bool hasMatte() { if (mLayerData->mMatteType == MatteType::None) return false; return true; }
@@ -148,7 +156,7 @@ protected:
 class LOTCompLayerItem: public LOTLayerItem
 {
 public:
-   explicit LOTCompLayerItem(LOTLayerData *layerData);
+   LOTCompLayerItem(LOTLayerData *layerData, int depth, size_t &nodeBudget);
    void renderList(std::vector<VDrawable *> &list)final;
    void render(VPainter *painter, const VRle &mask, const VRle &matteRle) final;
    void buildLayerNode() final;

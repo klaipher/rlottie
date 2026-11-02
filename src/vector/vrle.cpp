@@ -574,7 +574,11 @@ void blit(VRle::Span *spans, int count, uchar *buffer, int bufferLen, int offset
     }
 }
 
-size_t bufferToRle(uchar *buffer, int bufferLen, int size, int offsetX, int y, VRle::Span *out)
+// Upstream 480a2ad: `out` holds `capacity` spans, while an alternating
+// coverage row of bufferLen bytes yields up to bufferLen / 2 of them. A row
+// that does not fit is skipped (0 spans), as an over-wide row already is.
+size_t bufferToRle(uchar *buffer, int bufferLen, int size, int offsetX, int y, VRle::Span *out,
+                   size_t capacity)
 {
     size_t count = 0;
     uchar  value = buffer[0];
@@ -588,6 +592,7 @@ size_t bufferToRle(uchar *buffer, int bufferLen, int size, int offsetX, int y, V
         uchar curValue = buffer[0];
         if (value != curValue) {
             if (value) {
+                if (count == capacity) return 0;
                 out->y = y;
                 out->x = offsetX + curIndex;
                 out->len = i - curIndex;
@@ -601,6 +606,7 @@ size_t bufferToRle(uchar *buffer, int bufferLen, int size, int offsetX, int y, V
         buffer++;
     }
     if (value) {
+        if (count == capacity) return 0;
         out->y = y;
         out->x = offsetX + curIndex;
         out->len = size - curIndex;
@@ -650,7 +656,7 @@ static void rleOpGeneric(VRleHelper *a, VRleHelper *b, VRleHelper *result,
                 blitXor(bStart, (bPtr - bStart), array.data(), kBufferSize, -offset);
             VRle::Span *tResult = temp.data();
             size_t size = bufferToRle(array.data(), kBufferSize, std::max(aLength, bLength),
-                                      offset, y, tResult);
+                                      offset, y, tResult, temp.size());
             if (available >= size) {
                 while (size--) {
                     *out++ = *tResult++;
@@ -711,7 +717,7 @@ static void rleSubstractWithRle(VRleHelper *a, VRleHelper *b,
             blitDestinationOut(bStart, (bPtr - bStart), array.data(), kBufferSize, -offset);
             VRle::Span *tResult = temp.data();
             size_t size = bufferToRle(array.data(), kBufferSize, std::max(aLength, bLength),
-                                      offset, y, tResult);
+                                      offset, y, tResult, temp.size());
             if (available >= size) {
                 while (size--) {
                     *out++ = *tResult++;

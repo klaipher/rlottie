@@ -34,6 +34,15 @@
 
 V_USE_NAMESPACE
 
+// Security limits shared by the parser, the model passes and the item tree
+// (ported from upstream Samsung/rlottie 2cab35d and 8de0d9e).
+// Precomp nesting depth that is built and rendered (upstream value; tlottie
+// renders at most 26 levels).
+constexpr int kLottieMaxLayerDepth = 32;
+// Shape-group ("gr") nesting depth kept by the parser. Upstream uses 32;
+// 65 is tlottie's MAX_GROUP_DEPTH, so nothing tlottie accepts is cut here.
+constexpr int kLottieMaxGroupDepth = 65;
+
 class LOTCompositionData;
 class LOTLayerData;
 class LOTTransformData;
@@ -989,7 +998,16 @@ public:
     LOTRepeaterData():LOTData(LOTData::Type::Repeater){}
     LOTShapeGroupData *content() const { return mContent ? mContent.get() : nullptr; }
     void setContent(std::shared_ptr<LOTShapeGroupData> content) {mContent = std::move(content);}
-    int maxCopies() const { return int(mMaxCopies);}
+    // Upstream 2cab35d: mMaxCopies comes straight from JSON; int() of a
+    // non-finite or huge float is undefined and the item allocates one
+    // content group per copy.
+    static constexpr float kMaxRepeaterCopies = 10000.0f;
+    int maxCopies() const
+    {
+        if (!std::isfinite(mMaxCopies) || mMaxCopies <= 0.0f) return 0;
+        if (mMaxCopies > kMaxRepeaterCopies) return int(kMaxRepeaterCopies);
+        return int(mMaxCopies);
+    }
     float copies(int frameNo) const {return mCopies.value(frameNo);}
     float offset(int frameNo) const {return mOffset.value(frameNo);}
 public:

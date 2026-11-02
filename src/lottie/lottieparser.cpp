@@ -51,7 +51,9 @@
 // This parser uses in-situ strings, so the JSON buffer will be altered during
 // the parse.
 
+#include <algorithm>
 #include <array>
+#include <unordered_set>
 
 #include "lottiemodel.h"
 #include "rapidjson/document.h"
@@ -283,6 +285,7 @@ protected:
     std::vector<std::shared_ptr<LOTLayerData>> mLayersToUpdate;
     std::string                                mDirPath;
     std::vector<LayerInfo>                     mLayerInfoList;
+    int                                        mGroupDepth{0};
     void                                       SkipOut(int depth);
 };
 
@@ -549,6 +552,130 @@ LottieBlendMode LottieParserImpl::getBlendMode()
 
 void LottieParserImpl::resolveLayerRefs()
 {
+    // Upstream 1cda060: a precomp asset that (directly or through other
+    // assets) contains a layer referencing itself made the layer tree
+    // infinite (stack overflow in the repeater pass / LOTCompLayerItem, and a
+    // shared_ptr cycle). Precomp layers referencing an asset that can reach
+    // itself are left empty, exactly as upstream does. Upstream runs a BFS
+    // from every asset (quadratic: a 20k-asset chain takes minutes); this is
+    // the same predicate computed with one iterative Tarjan SCC pass: an
+    // asset can reach itself iff its SCC has more than one asset or it has a
+    // self-reference.
+    std::unordered_set<std::string> cyclicAssets;
+    {
+        std::vector<const std::string *>             ids;
+        std::unordered_map<std::string, size_t>      indexOf;
+        for (const auto &kv : compRef->mAssets) {
+            indexOf.emplace(kv.first, ids.size());
+            ids.push_back(&kv.first);
+        }
+        const size_t                     count = ids.size();
+        std::vector<std::vector<size_t>> edges(count);
+        std::vector<bool>                selfRef(count, false);
+        for (const auto &kv : compRef->mAssets) {
+            if (!kv.second) continue;
+            const size_t from = indexOf[kv.first];
+            for (const auto &obj : kv.second->mLayers) {
+                if (!obj || obj->type() != LOTData::Type::Layer) continue;
+                auto layer = static_cast<LOTLayerData *>(obj.get());
+                if (layer->mLayerType != LayerType::Precomp || !layer->mExtra ||
+                    layer->mExtra->mPreCompRefId.empty())
+                    continue;
+                auto to = indexOf.find(layer->mExtra->mPreCompRefId);
+                if (to == indexOf.end()) continue;
+                if (to->second == from) selfRef[from] = true;
+                edges[from].push_back(to->second);
+            }
+        }
+
+        const size_t        kUnvisited = size_t(-1);
+        std::vector<size_t> index(count, kUnvisited), lowlink(count, 0);
+        std::vector<bool>   onStack(count, false);
+        std::vector<size_t> sccStack;
+        std::vector<std::pair<size_t, size_t>> callStack;  // node, next edge
+        size_t              nextIndex = 0;
+        for (size_t root = 0; root < count; ++root) {
+            if (index[root] != kUnvisited) continue;
+            callStack.emplace_back(root, 0);
+            while (!callStack.empty()) {
+                const size_t v = callStack.back().first;
+                size_t &     edge = callStack.back().second;
+                if (edge == 0 && index[v] == kUnvisited) {
+                    index[v] = lowlink[v] = nextIndex++;
+                    sccStack.push_back(v);
+                    onStack[v] = true;
+                }
+                if (edge < edges[v].size()) {
+                    const size_t w = edges[v][edge++];
+                    if (index[w] == kUnvisited) {
+                        callStack.emplace_back(w, 0);
+                    } else if (onStack[w]) {
+                        lowlink[v] = std::min(lowlink[v], index[w]);
+                    }
+                    continue;
+                }
+                if (lowlink[v] == index[v]) {
+                    std::vector<size_t> component;
+                    size_t              w;
+                    do {
+                        w = sccStack.back();
+                        sccStack.pop_back();
+                        onStack[w] = false;
+                        component.push_back(w);
+                    } while (w != v);
+                    for (size_t c : component) {
+                        if (component.size() > 1 || selfRef[c])
+                            cyclicAssets.insert(*ids[c]);
+                    }
+                }
+                callStack.pop_back();
+                if (!callStack.empty()) {
+                    const size_t parent = callStack.back().first;
+                    lowlink[parent] = std::min(lowlink[parent], lowlink[v]);
+                }
+            }
+        }
+    }
+
+    // Layer items are only built up to kLottieMaxLayerDepth (see
+    // LOTCompItem::createLayerItem), so a precomp layer whose children would
+    // sit at or below that depth on every path from the root never renders
+    // them. Linking them anyway let an acyclic chain of N assets become an
+    // N-deep shared_ptr chain whose destructor overflowed a 512 KB worker
+    // stack (20k assets). Record the shallowest depth at which each precomp
+    // layer is reached (root layers are depth 1, like their items) and link
+    // only those whose children can be built; nothing that renders changes.
+    std::unordered_map<const LOTLayerData *, int> precompLayerDepth;
+    if (compRef->mRootLayer) {
+        std::unordered_map<std::string, int> assetDepth;
+        std::vector<std::pair<const std::vector<std::shared_ptr<LOTData>> *, int>>
+            pending{{&compRef->mRootLayer->mChildren, 1}};
+        while (!pending.empty()) {
+            auto container = pending.back();
+            pending.pop_back();
+            for (const auto &obj : *container.first) {
+                if (!obj || obj->type() != LOTData::Type::Layer) continue;
+                auto layer = static_cast<const LOTLayerData *>(obj.get());
+                if (layer->mLayerType != LayerType::Precomp || !layer->mExtra)
+                    continue;
+                auto known = precompLayerDepth.find(layer);
+                if (known != precompLayerDepth.end() &&
+                    known->second <= container.second)
+                    continue;
+                precompLayerDepth[layer] = container.second;
+                const int childDepth = container.second + 1;
+                if (childDepth >= kLottieMaxLayerDepth) continue;
+                auto asset = compRef->mAssets.find(layer->mExtra->mPreCompRefId);
+                if (asset == compRef->mAssets.end() || !asset->second) continue;
+                auto seen = assetDepth.find(asset->first);
+                if (seen != assetDepth.end() && seen->second <= childDepth)
+                    continue;
+                assetDepth[asset->first] = childDepth;
+                pending.emplace_back(&asset->second->mLayers, childDepth);
+            }
+        }
+    }
+
     for (const auto &i : mLayersToUpdate) {
         LOTLayerData *layer = i.get();
         auto          search = compRef->mAssets.find(layer->extra()->mPreCompRefId);
@@ -556,6 +683,11 @@ void LottieParserImpl::resolveLayerRefs()
             if (layer->mLayerType == LayerType::Image) {
                 layer->extra()->mAsset = search->second;
             } else if (layer->mLayerType == LayerType::Precomp) {
+                if (cyclicAssets.count(search->first)) continue;
+                auto depth = precompLayerDepth.find(layer);
+                if (depth == precompLayerDepth.end() ||
+                    depth->second + 1 >= kLottieMaxLayerDepth)
+                    continue;
                 layer->mChildren = search->second->mLayers;
                 layer->setStatic(layer->isStatic() &&
                                  search->second->isStatic());
@@ -1197,16 +1329,26 @@ std::shared_ptr<LOTData> LottieParserImpl::parseGroupObject()
         std::make_shared<LOTShapeGroupData>();
 
     LOTShapeGroupData *group = sharedGroup.get();
+    // Upstream 8de0d9e: nested "gr" objects recurse through parseObject();
+    // past kLottieMaxGroupDepth the deeper content is skipped (iteratively)
+    // instead of overflowing the stack.
+    const bool tooDeep = mGroupDepth >= kLottieMaxGroupDepth;
     while (const char *key = NextObjectKey()) {
         if (0 == strcmp(key, "nm")) {
             group->mName = GetString();
         } else if (0 == strcmp(key, "it")) {
+            if (tooDeep) {
+                Skip(key);
+                continue;
+            }
             RAPIDJSON_ASSERT(PeekType() == kArrayType);
             EnterArray();
+            ++mGroupDepth;
             while (NextArrayValue()) {
                 RAPIDJSON_ASSERT(PeekType() == kObjectType);
                 parseObject(group);
             }
+            --mGroupDepth;
             if (!group->mChildren.empty()
                 && group->mChildren.back()->mType == LOTData::Type::Transform) {
                 group->mTransform = std::static_pointer_cast<LOTTransformData>(

@@ -83,7 +83,8 @@ LOTCompItem::LOTCompItem(LOTModel *model)
     : mCurFrameNo(-1)
 {
     mCompData = model->mRoot.get();
-    mRootLayer = createLayerItem(mCompData->mRootLayer.get());
+    size_t nodeBudget = kMaxLayerNodes;
+    mRootLayer = createLayerItem(mCompData->mRootLayer.get(), 0, nodeBudget);
     mRootLayer->setComplexContent(false);
     mViewSize = mCompData->size();
 }
@@ -96,11 +97,15 @@ void LOTCompItem::setValue(const std::string &keypath, LOTVariant &value)
 }
 
 std::unique_ptr<LOTLayerItem> LOTCompItem::createLayerItem(
-    LOTLayerData *layerData)
+    LOTLayerData *layerData, int depth, size_t &nodeBudget)
 {
+    if (depth >= kMaxLayerDepth || nodeBudget == 0) return nullptr;
+    --nodeBudget;
+
     switch (layerData->mLayerType) {
     case LayerType::Precomp: {
-        return std::make_unique<LOTCompLayerItem>(layerData);
+        return std::make_unique<LOTCompLayerItem>(layerData, depth + 1,
+                                                  nodeBudget);
     }
     case LayerType::Solid: {
         return std::make_unique<LOTSolidLayerItem>(layerData);
@@ -503,8 +508,19 @@ void LOTLayerItem::update(int frameNumber, const VMatrix &parentMatrix,
 
 VMatrix LOTLayerItem::matrix(int frameNo) const
 {
+    return matrix(frameNo, 0);
+}
+
+// Upstream bf689b7: bound the parent-chain recursion. Cycles are already
+// rejected by isGoodParentLayer(), but an acyclic chain is still unbounded.
+// Upstream stops at 64; 128 matches tlottie's max_parent_chain_depth so no
+// animation tlottie accepts renders differently here.
+VMatrix LOTLayerItem::matrix(int frameNo, int depth) const
+{
+    if (depth > 128) return VMatrix{};
+
     return mParentLayer
-               ? (mLayerData->matrix(frameNo) * mParentLayer->matrix(frameNo))
+               ? (mLayerData->matrix(frameNo) * mParentLayer->matrix(frameNo, depth + 1))
                : mLayerData->matrix(frameNo);
 }
 
@@ -514,7 +530,8 @@ bool LOTLayerItem::visible() const
             frameNo() < mLayerData->outFrame());
 }
 
-LOTCompLayerItem::LOTCompLayerItem(LOTLayerData *layerModel)
+LOTCompLayerItem::LOTCompLayerItem(LOTLayerData *layerModel, int depth,
+                                   size_t &nodeBudget)
     : LOTLayerItem(layerModel)
 {
     // 1. create layer item
@@ -523,7 +540,7 @@ LOTCompLayerItem::LOTCompLayerItem(LOTLayerData *layerModel)
             continue;
         }
         auto model = static_cast<LOTLayerData *>(i.get());
-        auto item = LOTCompItem::createLayerItem(model);
+        auto item = LOTCompItem::createLayerItem(model, depth, nodeBudget);
         if (item) mLayers.push_back(std::move(item));
     }
 
@@ -1566,7 +1583,18 @@ void LOTRepeaterItem::update(int frameNo, const VMatrix &parentMatrix,
     DirtyFlag newFlag = flag;
 
     float copies = mRepeaterData->copies(frameNo);
-    int   visibleCopies = int(copies);
+    // int() of a NaN or out-of-range float is undefined; only the comparison
+    // with i in [0, mCopies) below matters, so clamp to an equivalent value.
+    int   visibleCopies;
+    if (std::isnan(copies)) {
+        visibleCopies = 0;
+    } else if (copies >= float(mCopies)) {
+        visibleCopies = mCopies;
+    } else if (copies <= -1.0f) {
+        visibleCopies = -1;
+    } else {
+        visibleCopies = int(copies);
+    }
 
     if (visibleCopies == 0) {
         mHidden = true;

@@ -138,6 +138,8 @@ bool VGradientCache::generateGradientColorTable(const VGradientStops &stops,
                                                 uint32_t *colorTable, int size)
 {
     if (stops.empty()) {
+        // Upstream b4f5101: never leave the cached table uninitialised.
+        for (int j = 0; j < size; ++j) colorTable[j] = 0;
         return false;
     }
     int                  dist, idist, pos = 0;
