@@ -12,7 +12,8 @@ History: [CHANGELOG.md](CHANGELOG.md). Format: docs/fork-records.md in klaipher/
 - Upstream: yes.
 - Sync: when TelegramMessenger/rlottie moves, compare these files first; the iOS and Mac builds must stay on the same commit (`tools/dev/parity` equal-SHA check).
 
-### nanogram-mac
-- What: the iOS line plus Mac build integration; merged from `telegram-ios-dev` (ade473c). No behavioural difference
-  from the iOS line at 2026-11-05 except what the merge brings.
-- Where: Mac app submodule `submodules/rlottie`.
+### One line for both apps (since 2026-11-05)
+- What: `LOTTIE_THREAD_SAFE` in `src/vector/config.h`, guarded with `#ifndef` (the Mac build reads this file; iOS passes `-DLOTTIE_THREAD_SAFE=1` in its BUILD). The former `nanogram-mac` branch (ade473c) is retired; both apps pin `telegram-ios-dev`.
+- Why: the Mac renders from several threads; one commit for both apps keeps the parity check's equal-SHA rule.
+- Where: `src/vector/config.h`.
+- Upstream: no (Telegram's Mac line defines it the same way).
